@@ -49,6 +49,7 @@ import com.apollocurrency.aplwallet.apl.util.NtpTime;
 import com.apollocurrency.aplwallet.apl.util.injectable.PropertiesHolder;
 import com.apollocurrency.aplwallet.apl.util.task.Task;
 import com.apollocurrency.aplwallet.apl.util.task.TaskDispatcher;
+import lombok.extern.slf4j.Slf4j;
 import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
 import org.slf4j.Logger;
@@ -81,6 +82,7 @@ import static java.util.Comparator.comparingLong;
 import static org.slf4j.LoggerFactory.getLogger;
 
 @Singleton
+@Slf4j
 public class TransactionProcessorImpl implements TransactionProcessor {
     private static final Logger LOG = getLogger(TransactionProcessorImpl.class);
     private static final Comparator<UnconfirmedTransaction> cachedUnconfirmedTransactionComparator =
@@ -327,6 +329,7 @@ public class TransactionProcessorImpl implements TransactionProcessor {
                         }
                     }
                     if (expiredTransactions.size() > 0) {
+                        log.debug("Found {} expired transactions", expiredTransactions.size());
                         globalSync.writeLock();
                         try {
                             TransactionalDataSource dataSource = lookupDataSource();
@@ -581,6 +584,7 @@ public class TransactionProcessorImpl implements TransactionProcessor {
             try (DbIterator<UnconfirmedTransaction> unconfirmedTransactions = getAllUnconfirmedTransactions()) {
                 for (UnconfirmedTransaction unconfirmedTransaction : unconfirmedTransactions) {
                     transactionApplier.undoUnconfirmed(unconfirmedTransaction.getTransaction());
+                    log.trace("Requeue tx - {}", unconfirmedTransaction.getId());
                     if (removed.size() < maxUnconfirmedTransactions) {
                         removed.add(unconfirmedTransaction.getTransaction());
                     }
@@ -634,6 +638,7 @@ public class TransactionProcessorImpl implements TransactionProcessor {
             int deleted = pstmt.executeUpdate();
             if (deleted > 0) {
                 transactionApplier.undoUnconfirmed(transaction);
+                log.trace("Remove unconfirmed tx - {}", transaction);
                 DbKey dbKey = transactionKeyFactory.newKey(transaction.getId());
                 transactionCache.remove(dbKey);
                 txsEvent.select(TxEventType.literal(TxEventType.REMOVED_UNCONFIRMED_TRANSACTIONS)).fire(Collections.singletonList(transaction));
@@ -655,6 +660,7 @@ public class TransactionProcessorImpl implements TransactionProcessor {
                     continue;
                 }
                 transaction.unsetBlock();
+                log.trace("Process later - {}", transaction.getId());
                 waitingTransactions.add(new UnconfirmedTransaction((TransactionImpl) transaction, Math.min(currentTime, Convert2.fromEpochTime(transaction.getTimestamp()))));
             }
         } finally {
@@ -673,6 +679,7 @@ public class TransactionProcessorImpl implements TransactionProcessor {
                     UnconfirmedTransaction unconfirmedTransaction = iterator.next();
                     try {
                         validator.validate(unconfirmedTransaction);
+                        log.trace("Process waiting transaction {}", unconfirmedTransaction.getId());
                         processTransaction(unconfirmedTransaction);
                         iterator.remove();
                         addedUnconfirmedTransactions.add(unconfirmedTransaction.getTransaction());
@@ -747,6 +754,7 @@ public class TransactionProcessorImpl implements TransactionProcessor {
 
     private void processTransaction(UnconfirmedTransaction unconfirmedTransaction) throws AplException.ValidationException {
         Transaction transaction = unconfirmedTransaction.getTransaction();
+        log.trace("Process tx {}", transaction.getId());
         int curTime = timeService.getEpochTime();
         if (transaction.getTimestamp() > curTime + Constants.MAX_TIMEDRIFT || transaction.getExpiration() < curTime) {
             throw new AplException.NotCurrentlyValidException("Invalid transaction timestamp");
@@ -782,6 +790,7 @@ public class TransactionProcessorImpl implements TransactionProcessor {
                 if (!transactionApplier.applyUnconfirmed(transaction)) {
                     throw new AplException.InsufficientBalanceException("Insufficient balance");
                 }
+                log.trace("Tx applied {}", transaction.getId());
 
                 if (transaction.isUnconfirmedDuplicate(unconfirmedDuplicates)) {
                     throw new AplException.NotCurrentlyValidException("Duplicate unconfirmed transaction");
@@ -790,6 +799,13 @@ public class TransactionProcessorImpl implements TransactionProcessor {
                 unconfirmedTransactionTable.insert(unconfirmedTransaction);
 
                 dataSource.commit();
+                if (log.isTraceEnabled()) {
+                    UnconfirmedTransaction saved = unconfirmedTransactionTable.get(unconfirmedTransactionTable.getDbKeyFactory().newKey(unconfirmedTransaction));
+                    log.trace("Tx was processed and saved {} - {}", transaction.getId(), saved);
+                    if (saved == null) {
+                        log.warn("Tx was not saved - ", transaction.getJSONObject());
+                    }
+                }
             } catch (Exception e) {
                 dataSource.rollback();
                 throw e;
