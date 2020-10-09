@@ -597,6 +597,9 @@ public class BlockchainProcessorImpl implements BlockchainProcessor {
             dataSource.begin();
             try {
                 previousLastBlock = blockchain.getLastBlock();
+                if (previousLastBlock.getHeight() == 91000) {
+                    throw new BlockNotAcceptedException("Node has already downloaded 91k blocks. No more blocks needed", blockSerializer.getJSONObject(block));
+                }
                 byte[] generatorPublicKey = previousLastBlock.getGeneratorPublicKey();
                 if (generatorPublicKey == null) {
                     generatorPublicKey = accountService.getPublicKeyByteArray(previousLastBlock.getGeneratorId());
